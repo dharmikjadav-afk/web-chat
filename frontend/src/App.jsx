@@ -1,4 +1,4 @@
-import { Routes, Route } from "react-router-dom";
+import { Routes, Route, useNavigate } from "react-router-dom";
 import { useState, useEffect } from "react";
 
 import Login from "./pages/Login";
@@ -14,14 +14,14 @@ function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setLoading(false);
-    }, 2000);
+    const token = localStorage.getItem("token");
 
-    return () => clearTimeout(timer);
+    // simulate quick auth check
+    setTimeout(() => {
+      setLoading(false);
+    }, 500);
   }, []);
 
-  // Show loader first
   if (loading) {
     return <LoadingScreen />;
   }

@@ -5,6 +5,7 @@ import { Link, useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { registerUser } from "../api/auth";
 import { AuthContext } from "../context/AuthContext";
+import { useForm } from "react-hook-form";
 
 function Register() {
   const navigate = useNavigate();
@@ -12,22 +13,16 @@ function Register() {
 
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-
-  const [form, setForm] = useState({
-    name: "",
-    email: "",
-    password: "",
-    confirmPassword: "",
-  });
-
   const [avatar, setAvatar] = useState(null);
 
-  const handleChange = (e) => {
-    setForm({
-      ...form,
-      [e.target.name]: e.target.value,
-    });
-  };
+  const {
+    register,
+    handleSubmit,
+    watch,
+    formState: { errors },
+  } = useForm();
+
+  const password = watch("password");
 
   const handleImage = (e) => {
     const file = e.target.files[0];
@@ -38,38 +33,23 @@ function Register() {
     }
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-
-    if (!form.name || !form.email || !form.password || !form.confirmPassword) {
-      return toast.error("Please fill all fields");
-    }
-
-    if (form.password !== form.confirmPassword) {
-      return toast.error("Passwords do not match");
-    }
-
-    if (form.password.length < 6) {
-      return toast.error("Password must be at least 6 characters");
-    }
-
+  const onSubmit = async (data) => {
     try {
       setLoading(true);
 
       const res = await registerUser({
-        name: form.name,
-        email: form.email,
-        password: form.password,
+        name: data.name,
+        email: data.email,
+        password: data.password,
       });
 
-      // Save login globally
       login(res);
 
       toast.success("Account created successfully");
 
       navigate("/chat");
     } catch (err) {
-      toast.error(err.response?.data?.message || "Registration failed");
+      toast.error(err.response?.data?.message || "Register failed");
     } finally {
       setLoading(false);
     }
@@ -124,7 +104,8 @@ function Register() {
 
         {/* Form */}
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+
           {/* Name */}
 
           <div className="relative">
@@ -132,14 +113,18 @@ function Register() {
 
             <input
               type="text"
-              name="name"
               placeholder="Full Name"
-              value={form.name}
-              onChange={handleChange}
-              required
+              {...register("name", { required: "Name is required" })}
               className="w-full pl-10 p-3 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-gray-800 dark:text-white focus:ring-2 focus:ring-emerald-500 outline-none"
             />
+
+            {errors.name && (
+              <p className="text-red-500 text-sm mt-1">
+                {errors.name.message}
+              </p>
+            )}
           </div>
+          
 
           {/* Email */}
 
@@ -148,13 +133,22 @@ function Register() {
 
             <input
               type="email"
-              name="email"
               placeholder="Email Address"
-              value={form.email}
-              onChange={handleChange}
-              required
+              {...register("email", {
+                required: "Email is required",
+                pattern: {
+                  value: /^\S+@\S+$/i,
+                  message: "Invalid email address",
+                },
+              })}
               className="w-full pl-10 p-3 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-gray-800 dark:text-white focus:ring-2 focus:ring-emerald-500 outline-none"
             />
+
+            {errors.email && (
+              <p className="text-red-500 text-sm mt-1">
+                {errors.email.message}
+              </p>
+            )}
           </div>
 
           {/* Password */}
@@ -164,11 +158,14 @@ function Register() {
 
             <input
               type={showPassword ? "text" : "password"}
-              name="password"
               placeholder="Password"
-              value={form.password}
-              onChange={handleChange}
-              required
+              {...register("password", {
+                required: "Password is required",
+                minLength: {
+                  value: 6,
+                  message: "Password must be at least 6 characters",
+                },
+              })}
               className="w-full pl-10 pr-10 p-3 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-gray-800 dark:text-white focus:ring-2 focus:ring-emerald-500 outline-none"
             />
 
@@ -179,6 +176,12 @@ function Register() {
             >
               {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
             </button>
+
+            {errors.password && (
+              <p className="text-red-500 text-sm mt-1">
+                {errors.password.message}
+              </p>
+            )}
           </div>
 
           {/* Confirm Password */}
@@ -188,13 +191,20 @@ function Register() {
 
             <input
               type="password"
-              name="confirmPassword"
               placeholder="Confirm Password"
-              value={form.confirmPassword}
-              onChange={handleChange}
-              required
+              {...register("confirmPassword", {
+                required: "Confirm password is required",
+                validate: (value) =>
+                  value === password || "Passwords do not match",
+              })}
               className="w-full pl-10 p-3 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-gray-800 dark:text-white focus:ring-2 focus:ring-emerald-500 outline-none"
             />
+
+            {errors.confirmPassword && (
+              <p className="text-red-500 text-sm mt-1">
+                {errors.confirmPassword.message}
+              </p>
+            )}
           </div>
 
           {/* Register Button */}

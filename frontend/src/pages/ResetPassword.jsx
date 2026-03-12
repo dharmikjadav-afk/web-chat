@@ -34,7 +34,7 @@ function ResetPassword() {
 
       await axios.post(
         `http://localhost:5000/api/auth/reset-password/${token}`,
-        { password },
+        { password, confirmPassword },
       );
 
       toast.success("Password reset successful");
@@ -64,6 +64,9 @@ function ResetPassword() {
         </p>
 
         <form onSubmit={submit} className="space-y-4">
+          {/* Hidden username field for accessibility */}
+          <input type="text" autoComplete="username" className="hidden" />
+
           {/* New Password */}
 
           <div className="relative">
