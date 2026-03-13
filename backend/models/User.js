@@ -28,6 +28,8 @@ const userSchema = new mongoose.Schema(
       type: String,
     },
 
+    publicKey: { type: String, default: null },
+
     resetToken: String,
     resetTokenExpire: Date,
   },

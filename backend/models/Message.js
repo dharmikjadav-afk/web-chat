@@ -22,6 +22,11 @@ const messageSchema = new mongoose.Schema(
       maxlength: 2000,
     },
 
+    encryptedMessage: { type: String, default: null }, // ✅
+    encryptedAesKey: { type: String, default: null }, // ✅
+    iv: { type: String, default: null }, // ✅
+    isEncrypted: { type: Boolean, default: false },
+
     messageType: {
       type: String,
       enum: ["text", "image", "file", "audio"],

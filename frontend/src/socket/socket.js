@@ -1,22 +1,23 @@
 import { io } from "socket.io-client";
 
-const SOCKET_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
-
-const socket = io(SOCKET_URL, {
-  autoConnect: true,
-  reconnection: true,
-  reconnectionAttempts: 5,
-  reconnectionDelay: 1000,
-  transports: ["websocket"],
-  withCredentials: true,
+const socket = io("http://localhost:5000", {
+  autoConnect: true, // connect immediately
+  reconnection: true, // auto reconnect if dropped
+  reconnectionAttempts: 5, // try 5 times
+  reconnectionDelay: 1000, // wait 1s between attempts
+  transports: ["websocket"], // skip long-polling, use WS directly (faster)
 });
 
 socket.on("connect", () => {
-  console.log("🟢 Socket connected:", socket.id);
+  console.log("Socket connected:", socket.id);
 });
 
-socket.on("disconnect", () => {
-  console.log("🔴 Socket disconnected");
+socket.on("disconnect", (reason) => {
+  console.log("Socket disconnected:", reason);
+});
+
+socket.on("connect_error", (err) => {
+  console.error("Socket connection error:", err.message);
 });
 
 export default socket;

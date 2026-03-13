@@ -6,7 +6,7 @@ exports.getUsers = async (req, res) => {
 
     const users = await User.find({
       _id: { $ne: currentUserId },
-    }).select("name email avatar");
+    }).select("name email avatar publicKey"); // ✅ include publicKey
 
     res.status(200).json(users);
   } catch (error) {

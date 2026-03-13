@@ -6,23 +6,46 @@ POST /api/messages
 */
 exports.sendMessage = async (req, res) => {
   try {
-    const { receiver, text } = req.body;
+    const {
+      receiver,
+      text,
+      encryptedMessage,
+      encryptedAesKey,
+      iv,
+      isEncrypted,
+    } = req.body;
 
     const sender = req.user.id;
 
-    if (!receiver || !text) {
+    // ✅ Only receiver is always required
+    if (!receiver) {
       return res.status(400).json({
-        message: "Receiver and message text are required",
+        message: "Receiver is required",
+      });
+    }
+
+    // ✅ For plain messages, text is required
+    // For encrypted messages, text can be empty
+    if (!isEncrypted && !text) {
+      return res.status(400).json({
+        message: "Message text is required",
       });
     }
 
     const message = await Message.create({
       sender,
       receiver,
-      text,
+      text: isEncrypted ? "" : text,
+      encryptedMessage: encryptedMessage || null,
+      encryptedAesKey: encryptedAesKey || null,
+      iv: iv || null,
+      isEncrypted: isEncrypted || false,
     });
 
-    res.status(201).json(message);
+    // ✅ Populate sender so frontend gets name/email
+    const populated = await message.populate("sender", "name email");
+
+    res.status(201).json(populated);
   } catch (error) {
     console.error("Send Message Error:", error);
 

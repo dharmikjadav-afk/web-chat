@@ -18,6 +18,14 @@ const server = http.createServer(app);
 
 /*
 =================================
+Environment
+=================================
+*/
+const PORT = process.env.PORT || 5000;
+const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+
+/*
+=================================
 Database Connection
 =================================
 */
@@ -28,12 +36,14 @@ connectDB();
 Security Middlewares
 =================================
 */
+
 app.use(helmet());
 
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: "Too many requests from this IP, please try again later.",
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
 app.use(limiter);
@@ -43,7 +53,6 @@ app.use(limiter);
 Core Middlewares
 =================================
 */
-const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 
 app.use(
   cors({
@@ -59,6 +68,7 @@ app.use(express.json());
 API Routes
 =================================
 */
+
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/messages", messageRoutes);
@@ -68,6 +78,7 @@ app.use("/api/messages", messageRoutes);
 Socket.io Setup
 =================================
 */
+
 const io = new Server(server, {
   cors: {
     origin: CLIENT_URL,
@@ -76,43 +87,40 @@ const io = new Server(server, {
 });
 
 io.on("connection", (socket) => {
-  console.log("⚡ User connected:", socket.id);
+  console.log("🟢 User connected:", socket.id);
 
   /*
   =============================
-  User joins personal room
+  Join User Room
   =============================
   */
   socket.on("join", (userId) => {
-    if (!userId) return;
-
     socket.join(userId);
-
-    console.log(`👤 User ${userId} joined their room`);
+    console.log(`📥 User joined room: ${userId}`);
   });
 
   /*
   =============================
-  Send message realtime
+  Send Message Realtime
   =============================
   */
   socket.on("send_message", (message) => {
-    console.log("Message received from socket:", message);
+    console.log("📩 Message received:", message);
 
     const receiverId = message.receiver?.toString();
 
-    if (!receiverId) return;
-
-    io.to(receiverId).emit("receive_message", message);
+    if (receiverId) {
+      io.to(receiverId).emit("receive_message", message);
+    }
   });
 
   /*
   =============================
-  Handle disconnect
+  Disconnect
   =============================
   */
   socket.on("disconnect", () => {
-    console.log("❌ User disconnected:", socket.id);
+    console.log("🔴 User disconnected:", socket.id);
   });
 });
 
@@ -121,6 +129,7 @@ io.on("connection", (socket) => {
 Global Error Handler
 =================================
 */
+
 app.use((err, req, res, next) => {
   console.error("Server Error:", err);
 
@@ -134,7 +143,6 @@ app.use((err, req, res, next) => {
 Start Server
 =================================
 */
-const PORT = process.env.PORT || 5000;
 
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);

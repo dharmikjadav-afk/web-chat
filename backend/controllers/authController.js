@@ -195,3 +195,17 @@ exports.resetPassword = async (req, res) => {
     });
   }
 };
+
+// ================= SAVE PUBLIC KEY =================
+exports.savePublicKey = async (req, res) => {
+  try {
+    const { publicKey } = req.body;
+
+    await User.findByIdAndUpdate(req.user.id, { publicKey });
+
+    res.json({ message: "Public key saved" });
+  } catch (error) {
+    console.error("Save public key error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
