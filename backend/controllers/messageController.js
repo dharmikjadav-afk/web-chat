@@ -11,38 +11,76 @@ exports.sendMessage = async (req, res) => {
       text,
       encryptedMessage,
       encryptedAesKey,
+      encryptedAesKeyReceiver,
+      encryptedAesKeySender,
       iv,
       isEncrypted,
     } = req.body;
 
     const sender = req.user.id;
 
-    // ✅ Only receiver is always required
+    // ✅ Receiver required
     if (!receiver) {
       return res.status(400).json({
         message: "Receiver is required",
       });
     }
 
-    // ✅ For plain messages, text is required
-    // For encrypted messages, text can be empty
+    // ✅ Plain message validation
     if (!isEncrypted && !text) {
       return res.status(400).json({
         message: "Message text is required",
       });
     }
 
+    // 🔐 Validate encrypted message
+    if (isEncrypted) {
+      if (!encryptedMessage || !iv) {
+        return res.status(400).json({
+          message: "Invalid encrypted message payload",
+        });
+      }
+
+      // At least one AES key must exist
+      if (
+        !encryptedAesKey &&
+        !encryptedAesKeyReceiver &&
+        !encryptedAesKeySender
+      ) {
+        return res.status(400).json({
+          message: "Missing encryption keys",
+        });
+      }
+    }
+
+    // ✅ Normalize AES key (fallback support)
+    const finalAesKey =
+      encryptedAesKey ||
+      encryptedAesKeyReceiver ||
+      encryptedAesKeySender ||
+      null;
+
+    // ✅ Create message safely
     const message = await Message.create({
       sender,
       receiver,
+
       text: isEncrypted ? "" : text,
+
       encryptedMessage: encryptedMessage || null,
-      encryptedAesKey: encryptedAesKey || null,
+
+      // Preferred new fields
+      encryptedAesKeyReceiver: encryptedAesKeyReceiver || null,
+      encryptedAesKeySender: encryptedAesKeySender || null,
+
+      // Backward compatibility
+      encryptedAesKey: finalAesKey,
+
       iv: iv || null,
       isEncrypted: isEncrypted || false,
     });
 
-    // ✅ Populate sender so frontend gets name/email
+    // Populate sender info
     const populated = await message.populate("sender", "name email");
 
     res.status(201).json(populated);

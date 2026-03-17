@@ -19,7 +19,7 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
       const token = localStorage.getItem("token");
       const receiverId = selectedUser._id || selectedUser.id;
 
-      // Fetch receiver's public key
+      // Fetch receiver public key
       const keyRes = await axios.get(
         `http://localhost:5000/api/users/${receiverId}/public-key`,
         { headers: { Authorization: `Bearer ${token}` } },
@@ -27,41 +27,30 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
 
       const receiverPublicKey = keyRes.data.publicKey;
 
-      // ✅ Also get sender's own public key for their own history
+      // Sender public key from localStorage
       const senderPublicKey = localStorage.getItem("publicKey");
 
       let messagePayload;
 
-      if (receiverPublicKey) {
-        // Encrypt for receiver
-        const encryptedForReceiver = await encryptMessage(
+      if (receiverPublicKey && senderPublicKey) {
+        // Encrypt message for BOTH users
+        const encrypted = await encryptMessage(
           trimmedMessage,
           receiverPublicKey,
+          senderPublicKey,
         );
-
-        // ✅ Encrypt for sender too (so sender can read history)
-        let encryptedForSender = null;
-        if (senderPublicKey) {
-          encryptedForSender = await encryptMessage(
-            trimmedMessage,
-            senderPublicKey,
-          );
-        }
 
         messagePayload = {
           receiver: receiverId,
           text: "",
-          // For receiver
-          encryptedMessage: encryptedForReceiver.encryptedMessage,
-          encryptedAesKey: encryptedForReceiver.encryptedAesKey,
-          iv: encryptedForReceiver.iv,
-          // ✅ For sender
-          senderEncryptedMessage: encryptedForSender?.encryptedMessage || null,
-          senderEncryptedAesKey: encryptedForSender?.encryptedAesKey || null,
-          senderIv: encryptedForSender?.iv || null,
+          encryptedMessage: encrypted.encryptedMessage,
+          encryptedAesKeyReceiver: encrypted.encryptedAesKeyReceiver,
+          encryptedAesKeySender: encrypted.encryptedAesKeySender,
+          iv: encrypted.iv,
           isEncrypted: true,
         };
       } else {
+        // fallback to plain text
         messagePayload = {
           receiver: receiverId,
           text: trimmedMessage,
@@ -77,7 +66,7 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
 
       const newMessage = res.data;
 
-      // ✅ Sender always sees plain text immediately in UI
+      // Show plain text immediately for sender UI
       const displayMessage = { ...newMessage, text: trimmedMessage };
 
       setMessages((prev) => {
@@ -85,10 +74,10 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
         return [...prev, displayMessage];
       });
 
-      // Emit to receiver via socket
+      // send socket message
       socket.emit("send_message", {
         ...newMessage,
-        text: trimmedMessage, // socket copy for sender's live view
+        text: trimmedMessage,
       });
     } catch (error) {
       console.error("Send message error:", error);
@@ -117,6 +106,7 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
         disabled={!selectedUser || sending}
         autoFocus
       />
+
       <button
         onClick={sendMessage}
         disabled={!message.trim() || sending || !selectedUser}

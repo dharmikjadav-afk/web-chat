@@ -11,7 +11,73 @@ function Chat() {
 
   const currentUser = JSON.parse(localStorage.getItem("user"))?.id;
 
-  // ✅ Listen for online users BEFORE joining
+  // 🧠 Safe decrypt helper (tries all keys)
+  const tryDecrypt = async (msg, privateKey) => {
+    const keysToTry = [
+      msg.encryptedAesKeySender,
+      msg.encryptedAesKeyReceiver,
+      msg.encryptedAesKey, // old messages
+    ].filter(Boolean);
+
+    for (let key of keysToTry) {
+      try {
+        const decrypted = await decryptMessage(
+          {
+            encryptedMessage: msg.encryptedMessage,
+            encryptedAesKey: key,
+            iv: msg.iv,
+          },
+          privateKey,
+        );
+
+        // If success → return immediately
+        if (decrypted && decrypted !== "🔒 Encrypted message") {
+          return decrypted;
+        }
+      } catch (err) {
+        // try next key
+      }
+    }
+
+    return "🔒 Encrypted message";
+  };
+
+  // ─────────────────────────────────────────────
+  // Decrypt messages from API
+  // ─────────────────────────────────────────────
+  const setMessagesSafe = useCallback(
+    async (msgs) => {
+      const privateKey = localStorage.getItem("privateKey");
+
+      if (!Array.isArray(msgs)) {
+        setMessages(msgs);
+        return;
+      }
+
+      const decryptedMessages = await Promise.all(
+        msgs.map(async (msg) => {
+          if (!msg.isEncrypted || !msg.encryptedMessage || !privateKey) {
+            return msg;
+          }
+
+          try {
+            const decrypted = await tryDecrypt(msg, privateKey);
+            return { ...msg, text: decrypted };
+          } catch (err) {
+            console.error("Decrypt failed:", err);
+            return { ...msg, text: "🔒 Encrypted message" };
+          }
+        }),
+      );
+
+      setMessages(decryptedMessages);
+    },
+    [currentUser],
+  );
+
+  // ─────────────────────────────────────────────
+  // Online users
+  // ─────────────────────────────────────────────
   useEffect(() => {
     socket.on("online_users", (users) => {
       setOnlineUsers(users);
@@ -24,20 +90,27 @@ function Chat() {
     return () => socket.off("online_users");
   }, [currentUser]);
 
-  // ✅ Rejoin on reconnect
+  // ─────────────────────────────────────────────
+  // Reconnect
+  // ─────────────────────────────────────────────
   useEffect(() => {
     const handleConnect = () => {
       if (currentUser) socket.emit("join", currentUser);
     };
+
     socket.on("connect", handleConnect);
+
     return () => socket.off("connect", handleConnect);
   }, [currentUser]);
 
-  // ✅ Receive + decrypt messages
+  // ─────────────────────────────────────────────
+  // Receive messages
+  // ─────────────────────────────────────────────
   const handleReceiveMessage = useCallback(
     async (message) => {
       const senderId =
         message.sender?._id || message.sender?.id || message.sender;
+
       const receiverId =
         message.receiver?._id || message.receiver?.id || message.receiver;
 
@@ -54,25 +127,15 @@ function Chat() {
 
       let displayMessage = { ...message };
 
-      // ✅ Decrypt only if receiver and message is encrypted
-      if (message.isEncrypted && receiverId === currentUser) {
+      if (message.isEncrypted && message.encryptedMessage) {
         const privateKey = localStorage.getItem("privateKey");
-        if (privateKey && message.encryptedMessage) {
-          try {
-            const decrypted = await decryptMessage(
-              {
-                encryptedMessage: message.encryptedMessage,
-                encryptedAesKey: message.encryptedAesKey,
-                iv: message.iv,
-              },
-              privateKey,
-            );
-            displayMessage = { ...message, text: decrypted };
-            console.log("Message decrypted ✅");
-          } catch (err) {
-            console.error("Decrypt error:", err);
-            displayMessage = { ...message, text: "🔒 Encrypted message" };
-          }
+
+        try {
+          const decrypted = await tryDecrypt(message, privateKey);
+          displayMessage = { ...message, text: decrypted };
+        } catch (err) {
+          console.error("Decrypt error:", err);
+          displayMessage = { ...message, text: "🔒 Encrypted message" };
         }
       }
 
@@ -89,6 +152,9 @@ function Chat() {
     return () => socket.off("receive_message", handleReceiveMessage);
   }, [handleReceiveMessage]);
 
+  // ─────────────────────────────────────────────
+  // Select user
+  // ─────────────────────────────────────────────
   const handleSelectUser = (user) => {
     setSelectedUser(user);
     setMessages([]);
@@ -99,15 +165,16 @@ function Chat() {
       <div className="w-80 border-r border-gray-200 dark:border-slate-700">
         <ChatSidebar
           setSelectedUser={handleSelectUser}
-          setMessages={setMessages}
+          setMessages={setMessagesSafe}
           onlineUsers={onlineUsers}
         />
       </div>
+
       <div className="flex-1">
         <ChatWindow
           selectedUser={selectedUser}
           messages={messages}
-          setMessages={setMessages}
+          setMessages={setMessagesSafe}
           currentUser={currentUser}
           onlineUsers={onlineUsers}
         />
