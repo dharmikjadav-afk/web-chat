@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import axios from "axios";
 import socket from "../../socket/socket";
 import { encryptMessage } from "../../crypto/crypto";
@@ -7,6 +7,14 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
 
+  // 🎤 Voice states
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+
+  // ─────────────────────────────────────────────
+  // TEXT MESSAGE (UNCHANGED)
+  // ─────────────────────────────────────────────
   const sendMessage = async () => {
     if (!message.trim() || !selectedUser || sending) return;
 
@@ -19,21 +27,17 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
       const token = localStorage.getItem("token");
       const receiverId = selectedUser._id || selectedUser.id;
 
-      // Fetch receiver public key
       const keyRes = await axios.get(
         `http://localhost:5000/api/users/${receiverId}/public-key`,
         { headers: { Authorization: `Bearer ${token}` } },
       );
 
       const receiverPublicKey = keyRes.data.publicKey;
-
-      // Sender public key from localStorage
       const senderPublicKey = localStorage.getItem("publicKey");
 
       let messagePayload;
 
       if (receiverPublicKey && senderPublicKey) {
-        // Encrypt message for BOTH users
         const encrypted = await encryptMessage(
           trimmedMessage,
           receiverPublicKey,
@@ -50,7 +54,6 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
           isEncrypted: true,
         };
       } else {
-        // fallback to plain text
         messagePayload = {
           receiver: receiverId,
           text: trimmedMessage,
@@ -66,7 +69,6 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
 
       const newMessage = res.data;
 
-      // Show plain text immediately for sender UI
       const displayMessage = { ...newMessage, text: trimmedMessage };
 
       setMessages((prev) => {
@@ -74,7 +76,6 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
         return [...prev, displayMessage];
       });
 
-      // send socket message
       socket.emit("send_message", {
         ...newMessage,
         text: trimmedMessage,
@@ -87,6 +88,84 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
     }
   };
 
+  // ─────────────────────────────────────────────
+  // 🎤 START RECORDING
+  // ─────────────────────────────────────────────
+  const startRecording = async () => {
+    if (!selectedUser || sending) return;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+      });
+
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        audioChunksRef.current.push(event.data);
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+    } catch (error) {
+      console.error("Recording error:", error);
+    }
+  };
+
+  // ─────────────────────────────────────────────
+  // 🎤 STOP & SEND AUDIO
+  // ─────────────────────────────────────────────
+  const stopRecording = async () => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder) return;
+
+    recorder.stop();
+
+    recorder.onstop = async () => {
+      const audioBlob = new Blob(audioChunksRef.current, {
+        type: "audio/webm",
+      });
+
+      const formData = new FormData();
+      formData.append("audio", audioBlob);
+
+      const token = localStorage.getItem("token");
+      const receiverId = selectedUser._id || selectedUser.id;
+      formData.append("receiver", receiverId);
+
+      try {
+        const res = await axios.post(
+          "http://localhost:5000/api/messages",
+          formData,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "multipart/form-data",
+            },
+          },
+        );
+
+        const newMessage = res.data;
+
+        setMessages((prev) => {
+          if (prev.some((msg) => msg._id === newMessage._id)) return prev;
+          return [...prev, newMessage];
+        });
+
+        socket.emit("send_message", newMessage);
+      } catch (error) {
+        console.error("Audio send error:", error);
+      }
+    };
+
+    setIsRecording(false);
+  };
+
+  // ─────────────────────────────────────────────
+  // ENTER KEY
+  // ─────────────────────────────────────────────
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -103,10 +182,29 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
         value={message}
         onChange={(e) => setMessage(e.target.value)}
         onKeyDown={handleKeyDown}
-        disabled={!selectedUser || sending}
+        disabled={!selectedUser || sending || isRecording}
         autoFocus
       />
 
+      {/* 🎤 Mic Button */}
+      {!isRecording ? (
+        <button
+          onClick={startRecording}
+          disabled={!selectedUser || sending}
+          className="px-3 py-3 bg-gray-200 dark:bg-slate-700 rounded-lg"
+        >
+          🎤
+        </button>
+      ) : (
+        <button
+          onClick={stopRecording}
+          className="px-3 py-3 bg-red-500 text-white rounded-lg animate-pulse"
+        >
+          ⏹
+        </button>
+      )}
+
+      {/* Send Button */}
       <button
         onClick={sendMessage}
         disabled={!message.trim() || sending || !selectedUser}

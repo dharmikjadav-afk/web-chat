@@ -24,6 +24,20 @@ const messageSchema = new mongoose.Schema(
     },
 
     // ─────────────────────────────────────────────
+    // 🆕 Media fields (SAFE ADDITION)
+    // ─────────────────────────────────────────────
+
+    audio: {
+      type: String, // Cloudinary URL
+      default: null,
+    },
+
+    file: {
+      type: String, // for future (file/image support)
+      default: null,
+    },
+
+    // ─────────────────────────────────────────────
     // Encryption fields
     // ─────────────────────────────────────────────
 
@@ -89,13 +103,20 @@ messageSchema.index({ sender: 1, receiver: 1 });
 messageSchema.index({ receiver: 1, createdAt: -1 });
 
 // ─────────────────────────────────────────────
-// Validation hook (important)
+// Validation hook (IMPORTANT FIX)
 // ─────────────────────────────────────────────
 messageSchema.pre("save", function (next) {
+  // 🔐 Encryption validation
   if (this.isEncrypted) {
-    // Ensure required encryption fields exist
     if (!this.encryptedMessage || !this.iv) {
       return next(new Error("Encrypted message missing required fields"));
+    }
+  }
+
+  // 🎤 Audio validation (NEW)
+  if (this.messageType === "audio") {
+    if (!this.audio) {
+      return next(new Error("Audio message missing audio URL"));
     }
   }
 });

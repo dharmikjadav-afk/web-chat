@@ -1,4 +1,5 @@
 const Message = require("../models/Message");
+const cloudinary = require("../config/cloudinary"); // make sure this exists
 
 /*
 Send Message
@@ -26,8 +27,21 @@ exports.sendMessage = async (req, res) => {
       });
     }
 
-    // ✅ Plain message validation
-    if (!isEncrypted && !text) {
+    let audioUrl = null;
+    let messageType = "text";
+
+    // 🎤 Handle audio file (NEW)
+    if (req.file) {
+      const result = await cloudinary.uploader.upload(req.file.path, {
+        resource_type: "video", // IMPORTANT for audio
+      });
+
+      audioUrl = result.secure_url;
+      messageType = "audio";
+    }
+
+    // ✅ Plain message validation (only if NOT audio & NOT encrypted)
+    if (!req.file && !isEncrypted && !text) {
       return res.status(400).json({
         message: "Message text is required",
       });
@@ -41,7 +55,6 @@ exports.sendMessage = async (req, res) => {
         });
       }
 
-      // At least one AES key must exist
       if (
         !encryptedAesKey &&
         !encryptedAesKeyReceiver &&
@@ -65,17 +78,20 @@ exports.sendMessage = async (req, res) => {
       sender,
       receiver,
 
-      text: isEncrypted ? "" : text,
+      // TEXT
+      text: isEncrypted || req.file ? "" : text,
 
+      // AUDIO
+      audio: audioUrl,
+
+      // MESSAGE TYPE
+      messageType,
+
+      // ENCRYPTION
       encryptedMessage: encryptedMessage || null,
-
-      // Preferred new fields
       encryptedAesKeyReceiver: encryptedAesKeyReceiver || null,
       encryptedAesKeySender: encryptedAesKeySender || null,
-
-      // Backward compatibility
       encryptedAesKey: finalAesKey,
-
       iv: iv || null,
       isEncrypted: isEncrypted || false,
     });

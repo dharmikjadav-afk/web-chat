@@ -11,12 +11,23 @@ function Chat() {
 
   const currentUser = JSON.parse(localStorage.getItem("user"))?.id;
 
-  // 🧠 Safe decrypt helper (tries all keys)
+  // 🧠 FINAL CLEAN SAFE DECRYPT FUNCTION
   const tryDecrypt = async (msg, privateKey) => {
+    // 🚫 Skip unnecessary cases (VERY IMPORTANT)
+    if (
+      msg.messageType === "audio" ||
+      !msg.isEncrypted ||
+      !msg.encryptedMessage ||
+      !msg.iv ||
+      !privateKey
+    ) {
+      return msg.text || "";
+    }
+
     const keysToTry = [
       msg.encryptedAesKeySender,
       msg.encryptedAesKeyReceiver,
-      msg.encryptedAesKey, // old messages
+      msg.encryptedAesKey,
     ].filter(Boolean);
 
     for (let key of keysToTry) {
@@ -27,15 +38,14 @@ function Chat() {
             encryptedAesKey: key,
             iv: msg.iv,
           },
-          privateKey,
+          privateKey
         );
 
-        // If success → return immediately
         if (decrypted && decrypted !== "🔒 Encrypted message") {
           return decrypted;
         }
       } catch (err) {
-        // try next key
+        // ❌ Ignore silently (expected behavior)
       }
     }
 
@@ -56,23 +66,14 @@ function Chat() {
 
       const decryptedMessages = await Promise.all(
         msgs.map(async (msg) => {
-          if (!msg.isEncrypted || !msg.encryptedMessage || !privateKey) {
-            return msg;
-          }
-
-          try {
-            const decrypted = await tryDecrypt(msg, privateKey);
-            return { ...msg, text: decrypted };
-          } catch (err) {
-            console.error("Decrypt failed:", err);
-            return { ...msg, text: "🔒 Encrypted message" };
-          }
-        }),
+          const decryptedText = await tryDecrypt(msg, privateKey);
+          return { ...msg, text: decryptedText };
+        })
       );
 
       setMessages(decryptedMessages);
     },
-    [currentUser],
+    [currentUser]
   );
 
   // ─────────────────────────────────────────────
@@ -125,26 +126,21 @@ function Chat() {
 
       if (!isRelevant) return;
 
-      let displayMessage = { ...message };
+      const privateKey = localStorage.getItem("privateKey");
 
-      if (message.isEncrypted && message.encryptedMessage) {
-        const privateKey = localStorage.getItem("privateKey");
+      const decryptedText = await tryDecrypt(message, privateKey);
 
-        try {
-          const decrypted = await tryDecrypt(message, privateKey);
-          displayMessage = { ...message, text: decrypted };
-        } catch (err) {
-          console.error("Decrypt error:", err);
-          displayMessage = { ...message, text: "🔒 Encrypted message" };
-        }
-      }
+      const displayMessage = {
+        ...message,
+        text: decryptedText,
+      };
 
       setMessages((prev) => {
         if (prev.some((msg) => msg._id === displayMessage._id)) return prev;
         return [...prev, displayMessage];
       });
     },
-    [selectedUser, currentUser],
+    [selectedUser, currentUser]
   );
 
   useEffect(() => {
