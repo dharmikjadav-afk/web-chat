@@ -212,3 +212,134 @@ export async function decryptMessage(
     return "🔒 Encrypted message";
   }
 }
+
+// ─── Encrypt Audio Blob ────────────────────────────────────────────────
+export async function encryptAudioBlob(
+  audioBlob,
+  receiverPublicKeyBase64,
+  senderPublicKeyBase64,
+) {
+  // 1️⃣ Read blob into raw bytes
+  const audioBuffer = await audioBlob.arrayBuffer();
+
+  // 2️⃣ Generate a fresh AES-GCM key (one per message, just like text)
+  const aesKey = await window.crypto.subtle.generateKey(
+    { name: "AES-GCM", length: 256 },
+    true,
+    ["encrypt", "decrypt"],
+  );
+
+  // 3️⃣ Encrypt the raw audio bytes
+  const iv = window.crypto.getRandomValues(new Uint8Array(12));
+
+  const encryptedBuffer = await window.crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    aesKey,
+    audioBuffer,
+  );
+
+  // 4️⃣ Export the AES key so we can RSA-wrap it
+  const exportedAesKey = await window.crypto.subtle.exportKey("raw", aesKey);
+
+  // 5️⃣ Wrap AES key with receiver's public key
+  const receiverPublicKey = await importPublicKey(receiverPublicKeyBase64);
+
+  const encryptedAesKeyReceiver = await window.crypto.subtle.encrypt(
+    { name: "RSA-OAEP" },
+    receiverPublicKey,
+    exportedAesKey,
+  );
+
+  // 6️⃣ Wrap AES key with sender's public key (so sender can replay their own audio)
+  const senderPublicKey = await importPublicKey(senderPublicKeyBase64);
+
+  const encryptedAesKeySender = await window.crypto.subtle.encrypt(
+    { name: "RSA-OAEP" },
+    senderPublicKey,
+    exportedAesKey,
+  );
+
+  // 7️⃣ Return encrypted Blob (ciphertext) + base64-encoded keys + iv
+  const encryptedBlob = new Blob([encryptedBuffer], {
+    type: "application/octet-stream", // NOT audio/webm — this is raw ciphertext
+  });
+
+  return {
+    encryptedBlob,
+    encryptedAesKeyReceiver: btoa(
+      String.fromCharCode(...new Uint8Array(encryptedAesKeyReceiver)),
+    ),
+    encryptedAesKeySender: btoa(
+      String.fromCharCode(...new Uint8Array(encryptedAesKeySender)),
+    ),
+    iv: btoa(String.fromCharCode(...iv)),
+  };
+}
+
+// ─── Decrypt Audio Blob ────────────────────────────────────────────────
+export async function decryptAudioBlob(
+  message,
+  privateKeyBase64,
+  currentUserId,
+) {
+  const {
+    audio, // Cloudinary URL — contains raw ciphertext bytes
+    encryptedAesKeyReceiver,
+    encryptedAesKeySender,
+    encryptedAesKey, // legacy fallback for old messages
+    iv,
+    sender,
+  } = message;
+
+  // 1️⃣ Fetch the ciphertext bytes from Cloudinary
+  const response = await fetch(audio);
+  const cipherBuffer = await response.arrayBuffer();
+
+  // 2️⃣ Pick the correct wrapped AES key based on who is viewing
+  const senderId = sender?._id || sender?.id || sender;
+
+  let selectedKey =
+    currentUserId === senderId
+      ? encryptedAesKeySender
+      : encryptedAesKeyReceiver;
+
+  // Fallback for legacy messages that only stored one key
+  if (!selectedKey) selectedKey = encryptedAesKey;
+  if (!selectedKey) throw new Error("No AES key found for this user");
+
+  // 3️⃣ RSA-unwrap the AES key using our private key
+  const privateKey = await importPrivateKey(privateKeyBase64);
+
+  const encryptedAesKeyBytes = Uint8Array.from(atob(selectedKey), (c) =>
+    c.charCodeAt(0),
+  );
+
+  const decryptedAesKeyBytes = await window.crypto.subtle.decrypt(
+    { name: "RSA-OAEP" },
+    privateKey,
+    encryptedAesKeyBytes,
+  );
+
+  // 4️⃣ Import the raw AES key
+  const aesKey = await window.crypto.subtle.importKey(
+    "raw",
+    decryptedAesKeyBytes,
+    { name: "AES-GCM" },
+    false,
+    ["decrypt"],
+  );
+
+  // 5️⃣ Decrypt the audio bytes
+  const ivBytes = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0));
+
+  const decryptedBuffer = await window.crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: ivBytes },
+    aesKey,
+    cipherBuffer,
+  );
+
+  // 6️⃣ Wrap in a Blob and return a local playable URL
+  // This URL never leaves the browser — Cloudinary only ever saw ciphertext
+  const audioBlob = new Blob([decryptedBuffer], { type: "audio/webm" });
+  return URL.createObjectURL(audioBlob);
+}

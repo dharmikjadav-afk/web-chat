@@ -24,6 +24,9 @@ const fileFilter = (req, file, cb) => {
     "audio/wav",
     "audio/mp3",
     "audio/ogg",
+    // ✅ Encrypted audio blobs are sent as raw binary (application/octet-stream)
+    // because the actual audio bytes are ciphertext — not a recognizable audio format
+    "application/octet-stream",
   ];
 
   if (allowedTypes.includes(file.mimetype)) {

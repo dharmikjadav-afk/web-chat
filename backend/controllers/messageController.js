@@ -33,8 +33,13 @@ exports.sendMessage = async (req, res) => {
     // 🎤 Handle audio upload
     if (req.file) {
       try {
+        // 🔐 Encrypted blobs are raw binary (application/octet-stream) —
+        // Cloudinary rejects them with resource_type "video".
+        // Use resource_type "raw" for encrypted, "video" for plain audio.
+        const isEncryptedUpload = isEncrypted === "true" || isEncrypted === true;
+
         const result = await cloudinary.uploader.upload(req.file.path, {
-          resource_type: "video", // needed for audio
+          resource_type: isEncryptedUpload ? "raw" : "video",
         });
 
         audioUrl = result.secure_url;
@@ -54,7 +59,7 @@ exports.sendMessage = async (req, res) => {
       });
     }
 
-    // 🔐 Encrypted validation (only for text)
+    // 🔐 Encrypted validation (only for text messages)
     if (isEncrypted && messageType === "text") {
       if (!encryptedMessage || !iv) {
         return res.status(400).json({
@@ -73,6 +78,28 @@ exports.sendMessage = async (req, res) => {
       }
     }
 
+    // 🔐 Encrypted validation for audio messages
+    // FormData sends booleans as strings, so we check both "true" and true
+    const isEncryptedBool = isEncrypted === "true" || isEncrypted === true;
+
+    if (isEncryptedBool && messageType === "audio") {
+      if (!iv) {
+        return res.status(400).json({
+          message: "Missing IV for encrypted audio",
+        });
+      }
+
+      if (
+        !encryptedAesKey &&
+        !encryptedAesKeyReceiver &&
+        !encryptedAesKeySender
+      ) {
+        return res.status(400).json({
+          message: "Missing encryption keys for audio",
+        });
+      }
+    }
+
     // ✅ Normalize AES key (fallback)
     const finalAesKey =
       encryptedAesKey ||
@@ -86,7 +113,7 @@ exports.sendMessage = async (req, res) => {
       receiver,
 
       // TEXT (empty if encrypted OR audio)
-      text: isEncrypted || messageType === "audio" ? "" : text,
+      text: isEncryptedBool || messageType === "audio" ? "" : text,
 
       // AUDIO
       audio: audioUrl,
@@ -100,7 +127,7 @@ exports.sendMessage = async (req, res) => {
       encryptedAesKeySender: encryptedAesKeySender || null,
       encryptedAesKey: finalAesKey,
       iv: iv || null,
-      isEncrypted: isEncrypted || false,
+      isEncrypted: isEncryptedBool,
     });
 
     // ✅ Populate sender info

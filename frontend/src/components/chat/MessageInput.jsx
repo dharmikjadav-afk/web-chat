@@ -1,7 +1,7 @@
 import { useState, useRef } from "react";
 import axios from "axios";
 import socket from "../../socket/socket";
-import { encryptMessage } from "../../crypto/crypto";
+import { encryptMessage, encryptAudioBlob } from "../../crypto/crypto";
 
 function MessageInput({ selectedUser, setMessages, currentUser }) {
   const [message, setMessage] = useState("");
@@ -115,7 +115,7 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
   };
 
   // ─────────────────────────────────────────────
-  // 🎤 STOP & SEND AUDIO
+  // 🎤 STOP & SEND AUDIO (NOW ENCRYPTED)
   // ─────────────────────────────────────────────
   const stopRecording = async () => {
     const recorder = mediaRecorderRef.current;
@@ -128,14 +128,47 @@ function MessageInput({ selectedUser, setMessages, currentUser }) {
         type: "audio/webm",
       });
 
-      const formData = new FormData();
-      formData.append("audio", audioBlob);
-
       const token = localStorage.getItem("token");
       const receiverId = selectedUser._id || selectedUser.id;
-      formData.append("receiver", receiverId);
 
       try {
+        // ── Fetch receiver's public key (same as text messages) ──────────
+        const keyRes = await axios.get(
+          `http://localhost:5000/api/users/${receiverId}/public-key`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+
+        const receiverPublicKey = keyRes.data.publicKey;
+        const senderPublicKey = localStorage.getItem("publicKey");
+
+        const formData = new FormData();
+        formData.append("receiver", receiverId);
+
+        if (receiverPublicKey && senderPublicKey) {
+          // ── Encrypt the blob before uploading ──────────────────────────
+          const {
+            encryptedBlob,
+            encryptedAesKeyReceiver,
+            encryptedAesKeySender,
+            iv,
+          } = await encryptAudioBlob(
+            audioBlob,
+            receiverPublicKey,
+            senderPublicKey,
+          );
+
+          // Upload ciphertext bytes — Cloudinary never sees real audio
+          formData.append("audio", encryptedBlob, "audio.enc");
+          formData.append("isEncrypted", "true");
+          formData.append("encryptedAesKeyReceiver", encryptedAesKeyReceiver);
+          formData.append("encryptedAesKeySender", encryptedAesKeySender);
+          formData.append("iv", iv);
+        } else {
+          // Fallback: no keys available, send unencrypted
+          formData.append("audio", audioBlob, "audio.webm");
+          formData.append("isEncrypted", "false");
+        }
+
         const res = await axios.post(
           "http://localhost:5000/api/messages",
           formData,

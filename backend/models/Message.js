@@ -103,20 +103,23 @@ messageSchema.index({ sender: 1, receiver: 1 });
 messageSchema.index({ receiver: 1, createdAt: -1 });
 
 // ─────────────────────────────────────────────
-// Validation hook (IMPORTANT FIX)
+// Validation hook
+// Using async style (no next callback) — compatible with Mongoose v7+
 // ─────────────────────────────────────────────
-messageSchema.pre("save", function (next) {
-  // 🔐 Encryption validation
-  if (this.isEncrypted) {
+messageSchema.pre("save", async function () {
+  // 🔐 Encryption validation — only for text messages.
+  // Encrypted audio messages store keys + iv but NOT encryptedMessage,
+  // so we skip this check when messageType is "audio".
+  if (this.isEncrypted && this.messageType !== "audio") {
     if (!this.encryptedMessage || !this.iv) {
-      return next(new Error("Encrypted message missing required fields"));
+      throw new Error("Encrypted message missing required fields");
     }
   }
 
-  // 🎤 Audio validation (NEW)
+  // 🎤 Audio validation
   if (this.messageType === "audio") {
     if (!this.audio) {
-      return next(new Error("Audio message missing audio URL"));
+      throw new Error("Audio message missing audio URL");
     }
   }
 });

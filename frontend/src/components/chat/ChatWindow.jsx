@@ -71,23 +71,12 @@ function ChatWindow({
             );
             const isOwn = senderId === String(currentUser);
 
-            // 🧠 NEW: Safe handling for audio (future encryption ready)
-            let safeMessage = { ...msg };
-
-            if (msg.messageType === "audio") {
-              // If later encrypted → you will decrypt here
-              if (msg.isEncrypted) {
-                // Placeholder for future decryptBinary()
-                // safeMessage.audio = decryptedAudioUrl;
-                safeMessage.audio = null; // prevent broken audio
-              }
-            }
-
             return (
               <MessageBubble
                 key={msg._id}
-                message={safeMessage}
+                message={msg}
                 isOwn={isOwn}
+                currentUser={currentUser}
               />
             );
           })
