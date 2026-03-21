@@ -1,5 +1,5 @@
 const Message = require("../models/Message");
-const cloudinary = require("../config/cloudinary"); // make sure this exists
+const cloudinary = require("../config/cloudinary");
 
 /*
 Send Message
@@ -30,25 +30,32 @@ exports.sendMessage = async (req, res) => {
     let audioUrl = null;
     let messageType = "text";
 
-    // 🎤 Handle audio file (NEW)
+    // 🎤 Handle audio upload
     if (req.file) {
-      const result = await cloudinary.uploader.upload(req.file.path, {
-        resource_type: "video", // IMPORTANT for audio
-      });
+      try {
+        const result = await cloudinary.uploader.upload(req.file.path, {
+          resource_type: "video", // needed for audio
+        });
 
-      audioUrl = result.secure_url;
-      messageType = "audio";
+        audioUrl = result.secure_url;
+        messageType = "audio";
+      } catch (uploadError) {
+        console.error("Cloudinary Upload Error:", uploadError);
+        return res.status(500).json({
+          message: "Audio upload failed",
+        });
+      }
     }
 
-    // ✅ Plain message validation (only if NOT audio & NOT encrypted)
+    // ✅ Plain text validation
     if (!req.file && !isEncrypted && !text) {
       return res.status(400).json({
         message: "Message text is required",
       });
     }
 
-    // 🔐 Validate encrypted message
-    if (isEncrypted) {
+    // 🔐 Encrypted validation (only for text)
+    if (isEncrypted && messageType === "text") {
       if (!encryptedMessage || !iv) {
         return res.status(400).json({
           message: "Invalid encrypted message payload",
@@ -66,25 +73,25 @@ exports.sendMessage = async (req, res) => {
       }
     }
 
-    // ✅ Normalize AES key (fallback support)
+    // ✅ Normalize AES key (fallback)
     const finalAesKey =
       encryptedAesKey ||
       encryptedAesKeyReceiver ||
       encryptedAesKeySender ||
       null;
 
-    // ✅ Create message safely
+    // ✅ Create message
     const message = await Message.create({
       sender,
       receiver,
 
-      // TEXT
-      text: isEncrypted || req.file ? "" : text,
+      // TEXT (empty if encrypted OR audio)
+      text: isEncrypted || messageType === "audio" ? "" : text,
 
       // AUDIO
       audio: audioUrl,
 
-      // MESSAGE TYPE
+      // TYPE
       messageType,
 
       // ENCRYPTION
@@ -96,7 +103,7 @@ exports.sendMessage = async (req, res) => {
       isEncrypted: isEncrypted || false,
     });
 
-    // Populate sender info
+    // ✅ Populate sender info
     const populated = await message.populate("sender", "name email");
 
     res.status(201).json(populated);
@@ -117,6 +124,13 @@ exports.getMessages = async (req, res) => {
   try {
     const currentUser = req.user.id;
     const otherUser = req.params.userId;
+
+    // ✅ Validate userId
+    if (!otherUser) {
+      return res.status(400).json({
+        message: "User ID is required",
+      });
+    }
 
     const messages = await Message.find({
       $or: [

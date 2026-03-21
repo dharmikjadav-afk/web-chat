@@ -47,7 +47,9 @@ function ChatWindow({
             {selectedUser.name}
           </h3>
           <p
-            className={`text-xs font-medium ${isOnline ? "text-green-400" : "text-gray-400 dark:text-slate-400"}`}
+            className={`text-xs font-medium ${
+              isOnline ? "text-green-400" : "text-gray-400 dark:text-slate-400"
+            }`}
           >
             {isOnline ? "Online" : "Offline"}
           </p>
@@ -64,14 +66,30 @@ function ChatWindow({
           </div>
         ) : (
           messages.map((msg) => {
-            // ✅ THE FIX: String() both sides to handle
-            // populated objects, plain IDs, and ObjectIds
             const senderId = String(
               msg.sender?._id || msg.sender?.id || msg.sender || "",
             );
             const isOwn = senderId === String(currentUser);
 
-            return <MessageBubble key={msg._id} message={msg} isOwn={isOwn} />;
+            // 🧠 NEW: Safe handling for audio (future encryption ready)
+            let safeMessage = { ...msg };
+
+            if (msg.messageType === "audio") {
+              // If later encrypted → you will decrypt here
+              if (msg.isEncrypted) {
+                // Placeholder for future decryptBinary()
+                // safeMessage.audio = decryptedAudioUrl;
+                safeMessage.audio = null; // prevent broken audio
+              }
+            }
+
+            return (
+              <MessageBubble
+                key={msg._id}
+                message={safeMessage}
+                isOwn={isOwn}
+              />
+            );
           })
         )}
         <div ref={bottomRef} />

@@ -9,11 +9,13 @@ function Chat() {
   const [messages, setMessages] = useState([]);
   const [onlineUsers, setOnlineUsers] = useState([]);
 
-  const currentUser = JSON.parse(localStorage.getItem("user"))?.id;
+  // ✅ FIX: support both id and _id
+  const userData = JSON.parse(localStorage.getItem("user"));
+  const currentUser = userData?._id || userData?.id;
 
-  // 🧠 FINAL CLEAN SAFE DECRYPT FUNCTION
+  // 🧠 FINAL SAFE DECRYPT FUNCTION
   const tryDecrypt = async (msg, privateKey) => {
-    // 🚫 Skip unnecessary cases (VERY IMPORTANT)
+    // 🛑 Skip non-encrypted / audio / invalid cases
     if (
       msg.messageType === "audio" ||
       !msg.isEncrypted ||
@@ -24,32 +26,40 @@ function Chat() {
       return msg.text || "";
     }
 
-    const keysToTry = [
-      msg.encryptedAesKeySender,
-      msg.encryptedAesKeyReceiver,
-      msg.encryptedAesKey,
-    ].filter(Boolean);
+    try {
+      // 🧠 Normalize sender ID
+      const senderId = msg.sender?._id || msg.sender?.id || msg.sender;
 
-    for (let key of keysToTry) {
-      try {
-        const decrypted = await decryptMessage(
-          {
-            encryptedMessage: msg.encryptedMessage,
-            encryptedAesKey: key,
-            iv: msg.iv,
-          },
-          privateKey
-        );
+      // 🧠 Select correct AES key
+      let encryptedAesKey =
+        String(currentUser) === String(senderId)
+          ? msg.encryptedAesKeySender
+          : msg.encryptedAesKeyReceiver;
 
-        if (decrypted && decrypted !== "🔒 Encrypted message") {
-          return decrypted;
-        }
-      } catch (err) {
-        // ❌ Ignore silently (expected behavior)
+      // 🛟 Fallback (safety)
+      if (!encryptedAesKey) {
+        encryptedAesKey = msg.encryptedAesKey;
       }
-    }
 
-    return "🔒 Encrypted message";
+      if (!encryptedAesKey) {
+        return "🔒 Encrypted message";
+      }
+
+      // 🔓 Decrypt
+      const decrypted = await decryptMessage(
+        {
+          ...msg,
+          encryptedAesKey,
+        },
+        privateKey,
+        currentUser,
+      );
+
+      return decrypted || "🔒 Encrypted message";
+    } catch (err) {
+      console.error("Decrypt error:", err);
+      return "🔒 Encrypted message";
+    }
   };
 
   // ─────────────────────────────────────────────
@@ -68,12 +78,12 @@ function Chat() {
         msgs.map(async (msg) => {
           const decryptedText = await tryDecrypt(msg, privateKey);
           return { ...msg, text: decryptedText };
-        })
+        }),
       );
 
       setMessages(decryptedMessages);
     },
-    [currentUser]
+    [currentUser],
   );
 
   // ─────────────────────────────────────────────
@@ -92,7 +102,7 @@ function Chat() {
   }, [currentUser]);
 
   // ─────────────────────────────────────────────
-  // Reconnect
+  // Reconnect handling
   // ─────────────────────────────────────────────
   useEffect(() => {
     const handleConnect = () => {
@@ -115,14 +125,14 @@ function Chat() {
       const receiverId =
         message.receiver?._id || message.receiver?.id || message.receiver;
 
+      const selectedId = selectedUser?._id || selectedUser?.id;
+
       const isRelevant =
         selectedUser &&
-        (senderId === selectedUser._id ||
-          senderId === selectedUser.id ||
-          receiverId === selectedUser._id ||
-          receiverId === selectedUser.id ||
-          senderId === currentUser ||
-          receiverId === currentUser);
+        (String(senderId) === String(selectedId) ||
+          String(receiverId) === String(selectedId) ||
+          String(senderId) === String(currentUser) ||
+          String(receiverId) === String(currentUser));
 
       if (!isRelevant) return;
 
@@ -140,7 +150,7 @@ function Chat() {
         return [...prev, displayMessage];
       });
     },
-    [selectedUser, currentUser]
+    [selectedUser, currentUser],
   );
 
   useEffect(() => {

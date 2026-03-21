@@ -125,22 +125,64 @@ export async function encryptMessage(
 }
 
 // ─── Decrypt Message ───────────────────────────────────────────────────
-export async function decryptMessage(encryptedData, privateKeyBase64) {
+export async function decryptMessage(
+  encryptedData,
+  privateKeyBase64,
+  currentUserId,
+) {
   try {
-    const { encryptedMessage, encryptedAesKey, iv } = encryptedData;
+    const {
+      encryptedMessage,
+      encryptedAesKeyReceiver,
+      encryptedAesKeySender,
+      encryptedAesKey,
+      sender,
+      iv,
+      isEncrypted,
+      messageType,
+      text,
+    } = encryptedData;
 
+    // 🛑 1. Skip non-encrypted messages (IMPORTANT FIX)
+    if (!isEncrypted || messageType === "audio" || !encryptedMessage || !iv) {
+      return text || "";
+    }
+
+    // 🧠 2. Normalize sender ID
+    const senderId = sender?._id || sender?.id || sender;
+
+    // 🧠 3. Select correct AES key
+    let selectedKey =
+      currentUserId === senderId
+        ? encryptedAesKeySender
+        : encryptedAesKeyReceiver;
+
+    // 🛟 4. Fallback (for safety)
+    if (!selectedKey) {
+      selectedKey = encryptedAesKey;
+    }
+
+    // 🛑 5. Final protection (NO crash)
+    if (!selectedKey) {
+      return "🔒 Encrypted message";
+    }
+
+    // 🔐 6. Import private key
     const privateKey = await importPrivateKey(privateKeyBase64);
 
-    const encryptedAesKeyBytes = Uint8Array.from(atob(encryptedAesKey), (c) =>
+    // 🔄 7. Convert Base64 → Uint8Array
+    const encryptedAesKeyBytes = Uint8Array.from(atob(selectedKey), (c) =>
       c.charCodeAt(0),
     );
 
+    // 🔓 8. Decrypt AES key (RSA)
     const decryptedAesKeyBytes = await window.crypto.subtle.decrypt(
       { name: "RSA-OAEP" },
       privateKey,
       encryptedAesKeyBytes,
     );
 
+    // 🔑 9. Import AES key
     const aesKey = await window.crypto.subtle.importKey(
       "raw",
       decryptedAesKeyBytes,
@@ -149,12 +191,15 @@ export async function decryptMessage(encryptedData, privateKeyBase64) {
       ["decrypt"],
     );
 
+    // 🔄 10. Convert IV
     const ivBytes = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0));
 
+    // 🔄 11. Convert encrypted message
     const encryptedMessageBytes = Uint8Array.from(atob(encryptedMessage), (c) =>
       c.charCodeAt(0),
     );
 
+    // 🔓 12. Decrypt message (AES)
     const decryptedMessage = await window.crypto.subtle.decrypt(
       { name: "AES-GCM", iv: ivBytes },
       aesKey,
