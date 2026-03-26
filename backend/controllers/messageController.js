@@ -1,12 +1,74 @@
-const Message = require("../models/Message");
+const mongoose = require("mongoose");
+const Message   = require("../models/Message");
 const cloudinary = require("../config/cloudinary");
+const upload     = require("../middleware/upload");
 
 /*
-Send Message
-POST /api/messages
+==========================================================================
+  Message Controller
+  POST /api/messages   — send text · audio · image · file (all E2EE-aware)
+  GET  /api/messages/:userId — fetch conversation history
+==========================================================================
 */
+
+// ─────────────────────────────────────────────────────────────────────────
+// Internal helpers
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Normalise the isEncrypted flag.
+ * FormData always sends booleans as strings, so we handle both forms.
+ */
+const toBool = (val) => val === true || val === "true";
+
+/**
+ * Upload a single local file to Cloudinary and delete the temp file.
+ * @param {string} localPath   — absolute path from multer diskStorage
+ * @param {string} resourceType — "video" | "image" | "raw"
+ * @returns {Promise<string>}  — secure_url
+ */
+const uploadToCloudinary = async (localPath, resourceType) => {
+  try {
+    const result = await cloudinary.uploader.upload(localPath, {
+      resource_type: resourceType,
+    });
+    return result.secure_url;
+  } finally {
+    // Always remove the temp file — even if Cloudinary throws
+    upload.cleanupTempFile(localPath);
+  }
+};
+
+/**
+ * Validate that an encrypted payload contains the required fields.
+ * Returns an error message string, or null if valid.
+ */
+const validateEncryptedPayload = ({ iv, encryptedAesKeyReceiver, encryptedAesKeySender, encryptedAesKey, encryptedMessage, messageType }) => {
+  if (!iv) {
+    return `Missing IV for encrypted ${messageType} message`;
+  }
+
+  const hasAesKey =
+    encryptedAesKeyReceiver || encryptedAesKeySender || encryptedAesKey;
+
+  if (!hasAesKey) {
+    return `Missing AES key for encrypted ${messageType} message`;
+  }
+
+  if (messageType === "text" && !encryptedMessage) {
+    return "Missing encryptedMessage for encrypted text message";
+  }
+
+  return null;
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// POST /api/messages
+// ─────────────────────────────────────────────────────────────────────────
 exports.sendMessage = async (req, res) => {
   try {
+    const sender = req.user.id;
+
     const {
       receiver,
       text,
@@ -18,163 +80,160 @@ exports.sendMessage = async (req, res) => {
       isEncrypted,
     } = req.body;
 
-    const sender = req.user.id;
-
-    // ✅ Receiver required
+    // ── 1. Basic guard ────────────────────────────────────────────────────
     if (!receiver) {
-      return res.status(400).json({
-        message: "Receiver is required",
-      });
+      return res.status(400).json({ message: "Receiver is required" });
     }
 
-    let audioUrl = null;
+    if (!mongoose.Types.ObjectId.isValid(receiver)) {
+      return res.status(400).json({ message: "Invalid receiver ID" });
+    }
+
+    const isEncryptedBool = toBool(isEncrypted);
+
+    // ── 2. Resolve uploaded files from upload.fields() ────────────────────
+    // req.files is { audio: [file], file: [file] } when using upload.fields()
+    const audioFile = req.files?.audio?.[0] || null;
+    const mediaFile = req.files?.file?.[0]  || null;
+
+    // ── 3. Upload media and determine messageType ─────────────────────────
+    let audioUrl    = null;
+    let imageUrl    = null;
+    let fileUrl     = null;
+    let fileName    = null;
+    let fileSize    = null;
     let messageType = "text";
 
-    // 🎤 Handle audio upload
-    if (req.file) {
-      try {
-        // 🔐 Encrypted blobs are raw binary (application/octet-stream) —
-        // Cloudinary rejects them with resource_type "video".
-        // Use resource_type "raw" for encrypted, "video" for plain audio.
-        const isEncryptedUpload = isEncrypted === "true" || isEncrypted === true;
+    if (audioFile) {
+      // Encrypted blobs are raw binary — Cloudinary can't process them as video
+      const resourceType = isEncryptedBool ? "raw" : "video";
+      audioUrl    = await uploadToCloudinary(audioFile.path, resourceType);
+      messageType = "audio";
+    } else if (mediaFile) {
+      const isImage = mediaFile.mimetype.startsWith("image/");
+      fileName = mediaFile.originalname;
+      fileSize = mediaFile.size;
 
-        const result = await cloudinary.uploader.upload(req.file.path, {
-          resource_type: isEncryptedUpload ? "raw" : "video",
-        });
-
-        audioUrl = result.secure_url;
-        messageType = "audio";
-      } catch (uploadError) {
-        console.error("Cloudinary Upload Error:", uploadError);
-        return res.status(500).json({
-          message: "Audio upload failed",
-        });
+      if (isImage && !isEncryptedBool) {
+        // Plain images: let Cloudinary optimise and transform them
+        imageUrl    = await uploadToCloudinary(mediaFile.path, "image");
+        messageType = "image";
+      } else if (isImage && isEncryptedBool) {
+        // Encrypted images: ciphertext bytes — must use "raw"
+        imageUrl    = await uploadToCloudinary(mediaFile.path, "raw");
+        messageType = "image";
+      } else {
+        // Documents and all other files always use "raw"
+        fileUrl     = await uploadToCloudinary(mediaFile.path, "raw");
+        messageType = "file";
       }
     }
 
-    // ✅ Plain text validation
-    if (!req.file && !isEncrypted && !text) {
-      return res.status(400).json({
-        message: "Message text is required",
+    // ── 4. Payload validation ─────────────────────────────────────────────
+
+    // Plain text must not be empty
+    if (messageType === "text" && !isEncryptedBool) {
+      if (!text || !text.trim()) {
+        return res.status(400).json({ message: "Message text is required" });
+      }
+    }
+
+    // Encrypted messages must carry all crypto fields
+    if (isEncryptedBool) {
+      const validationError = validateEncryptedPayload({
+        iv,
+        encryptedAesKeyReceiver,
+        encryptedAesKeySender,
+        encryptedAesKey,
+        encryptedMessage,
+        messageType,
       });
-    }
 
-    // 🔐 Encrypted validation (only for text messages)
-    if (isEncrypted && messageType === "text") {
-      if (!encryptedMessage || !iv) {
-        return res.status(400).json({
-          message: "Invalid encrypted message payload",
-        });
-      }
-
-      if (
-        !encryptedAesKey &&
-        !encryptedAesKeyReceiver &&
-        !encryptedAesKeySender
-      ) {
-        return res.status(400).json({
-          message: "Missing encryption keys",
-        });
+      if (validationError) {
+        return res.status(400).json({ message: validationError });
       }
     }
 
-    // 🔐 Encrypted validation for audio messages
-    // FormData sends booleans as strings, so we check both "true" and true
-    const isEncryptedBool = isEncrypted === "true" || isEncrypted === true;
-
-    if (isEncryptedBool && messageType === "audio") {
-      if (!iv) {
-        return res.status(400).json({
-          message: "Missing IV for encrypted audio",
-        });
-      }
-
-      if (
-        !encryptedAesKey &&
-        !encryptedAesKeyReceiver &&
-        !encryptedAesKeySender
-      ) {
-        return res.status(400).json({
-          message: "Missing encryption keys for audio",
-        });
-      }
-    }
-
-    // ✅ Normalize AES key (fallback)
+    // ── 5. Normalise AES key (backward-compat fallback) ───────────────────
+    // Prefer the per-user keys; fall back to the legacy single-key field
+    // so messages from before the dual-key update still round-trip correctly.
     const finalAesKey =
-      encryptedAesKey ||
-      encryptedAesKeyReceiver ||
-      encryptedAesKeySender ||
-      null;
+      encryptedAesKey || encryptedAesKeyReceiver || encryptedAesKeySender || null;
 
-    // ✅ Create message
+    // ── 6. Persist ────────────────────────────────────────────────────────
     const message = await Message.create({
       sender,
       receiver,
 
-      // TEXT (empty if encrypted OR audio)
-      text: isEncryptedBool || messageType === "audio" ? "" : text,
+      // Text is empty for all non-plain-text messages
+      text: messageType === "text" && !isEncryptedBool ? (text || "").trim() : "",
 
-      // AUDIO
-      audio: audioUrl,
+      // Media URLs — only one will be set per message
+      audio:    audioUrl,
+      image:    imageUrl,
+      file:     fileUrl,
+      fileName: fileName,
+      fileSize: fileSize,
 
-      // TYPE
+      // Message classification
       messageType,
 
-      // ENCRYPTION
-      encryptedMessage: encryptedMessage || null,
+      // Encryption envelope
+      encryptedMessage:        encryptedMessage        || null,
       encryptedAesKeyReceiver: encryptedAesKeyReceiver || null,
-      encryptedAesKeySender: encryptedAesKeySender || null,
-      encryptedAesKey: finalAesKey,
-      iv: iv || null,
-      isEncrypted: isEncryptedBool,
+      encryptedAesKeySender:   encryptedAesKeySender   || null,
+      encryptedAesKey:         finalAesKey,
+      iv:                      iv                      || null,
+      isEncrypted:             isEncryptedBool,
     });
 
-    // ✅ Populate sender info
+    // ── 7. Populate and respond ───────────────────────────────────────────
     const populated = await message.populate("sender", "name email");
+    return res.status(201).json(populated);
 
-    res.status(201).json(populated);
   } catch (error) {
-    console.error("Send Message Error:", error);
+    console.error("[messageController] sendMessage error:", error);
 
-    res.status(500).json({
-      message: "Server error while sending message",
-    });
+    // Mongoose validation errors (from Message pre-save hook) → 400
+    if (error.name === "ValidationError") {
+      return res.status(400).json({ message: error.message });
+    }
+
+    return res.status(500).json({ message: "Server error while sending message" });
   }
 };
 
-/*
-Get Chat History
-GET /api/messages/:userId
-*/
+// ─────────────────────────────────────────────────────────────────────────
+// GET /api/messages/:userId
+// ─────────────────────────────────────────────────────────────────────────
 exports.getMessages = async (req, res) => {
   try {
     const currentUser = req.user.id;
-    const otherUser = req.params.userId;
+    const otherUser   = req.params.userId;
 
-    // ✅ Validate userId
     if (!otherUser) {
-      return res.status(400).json({
-        message: "User ID is required",
-      });
+      return res.status(400).json({ message: "User ID is required" });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(otherUser)) {
+      return res.status(400).json({ message: "Invalid user ID" });
     }
 
     const messages = await Message.find({
       $or: [
         { sender: currentUser, receiver: otherUser },
-        { sender: otherUser, receiver: currentUser },
+        { sender: otherUser,   receiver: currentUser },
       ],
     })
       .sort({ createdAt: 1 })
-      .populate("sender", "name email")
-      .populate("receiver", "name email");
+      .populate("sender",   "name email")
+      .populate("receiver", "name email")
+      .lean(); // plain JS objects — faster when you don't need Mongoose methods
 
-    res.status(200).json(messages);
+    return res.status(200).json(messages);
+
   } catch (error) {
-    console.error("Get Messages Error:", error);
-
-    res.status(500).json({
-      message: "Server error while fetching messages",
-    });
+    console.error("[messageController] getMessages error:", error);
+    return res.status(500).json({ message: "Server error while fetching messages" });
   }
 };

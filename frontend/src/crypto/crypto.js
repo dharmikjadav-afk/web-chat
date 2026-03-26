@@ -1,13 +1,185 @@
 /*
-===============================================
-End-to-End Encryption Utility
-- RSA-OAEP for key exchange
-- AES-GCM for message encryption
-Supports sender + receiver decryption
-===============================================
+==========================================================================
+  End-to-End Encryption Utility
+  Scheme  : RSA-OAEP (2048-bit) for key exchange
+            AES-GCM  (256-bit)  for payload encryption
+  Storage : One AES key is wrapped per participant (sender + receiver)
+            so both parties can independently decrypt any message or media.
+  Covers  : text messages · audio blobs · image blobs · file/doc blobs
+==========================================================================
 */
 
-// ─── Generate RSA Key Pair ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
+// Internal helpers — not exported, used only within this module
+// ─────────────────────────────────────────────────────────────────────────
+
+/** ArrayBuffer → Base64 string */
+const toBase64 = (buffer) =>
+  btoa(String.fromCharCode(...new Uint8Array(buffer)));
+
+/** Base64 string → Uint8Array */
+const fromBase64 = (base64) =>
+  Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+
+/** Normalise any sender shape to a plain string ID */
+const normaliseSenderId = (sender) =>
+  sender?._id || sender?.id || sender || null;
+
+/**
+ * Generate a fresh AES-GCM 256-bit key + random 12-byte IV.
+ * A new key is created for every single message — never reused.
+ */
+const generateAesKey = async () => {
+  const key = await window.crypto.subtle.generateKey(
+    { name: "AES-GCM", length: 256 },
+    true,
+    ["encrypt", "decrypt"],
+  );
+  const iv = window.crypto.getRandomValues(new Uint8Array(12));
+  return { key, iv };
+};
+
+/**
+ * Wrap (RSA-OAEP encrypt) a raw AES key with a given RSA public key.
+ * Returns a Base64 string ready to store in the database.
+ */
+const wrapAesKey = async (rawAesKey, rsaPublicKey) => {
+  const wrapped = await window.crypto.subtle.encrypt(
+    { name: "RSA-OAEP" },
+    rsaPublicKey,
+    rawAesKey,
+  );
+  return toBase64(wrapped);
+};
+
+/**
+ * Unwrap (RSA-OAEP decrypt) a Base64-encoded wrapped AES key.
+ * Returns a CryptoKey ready for AES-GCM decryption.
+ */
+const unwrapAesKey = async (wrappedBase64, rsaPrivateKey) => {
+  const wrappedBytes = fromBase64(wrappedBase64);
+  const decryptedAesBytes = await window.crypto.subtle.decrypt(
+    { name: "RSA-OAEP" },
+    rsaPrivateKey,
+    wrappedBytes,
+  );
+  return window.crypto.subtle.importKey(
+    "raw",
+    decryptedAesBytes,
+    { name: "AES-GCM" },
+    false,
+    ["decrypt"],
+  );
+};
+
+/**
+ * Select the correct wrapped AES key for the viewing user.
+ * Prefers the per-user key; falls back to the legacy single-key field
+ * so messages sent before the dual-key update still decrypt correctly.
+ */
+const selectAesKey = (message, currentUserId) => {
+  const senderId = normaliseSenderId(message.sender);
+  const isSender = String(currentUserId) === String(senderId);
+
+  return (
+    (isSender
+      ? message.encryptedAesKeySender
+      : message.encryptedAesKeyReceiver) ??
+    message.encryptedAesKey ?? // legacy fallback
+    null
+  );
+};
+
+/**
+ * Core AES-GCM encrypt: takes any ArrayBuffer, returns ciphertext ArrayBuffer.
+ */
+const aesEncrypt = async (buffer, aesKey, iv) =>
+  window.crypto.subtle.encrypt({ name: "AES-GCM", iv }, aesKey, buffer);
+
+/**
+ * Core AES-GCM decrypt: takes ciphertext ArrayBuffer, returns plaintext ArrayBuffer.
+ */
+const aesDecrypt = async (buffer, aesKey, ivBytes) =>
+  window.crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: ivBytes },
+    aesKey,
+    buffer,
+  );
+
+/**
+ * Full media encrypt pipeline (shared by audio, image, and file).
+ * Returns { encryptedBlob, encryptedAesKeyReceiver, encryptedAesKeySender, iv }
+ */
+const encryptBlob = async (
+  blob,
+  receiverPublicKeyBase64,
+  senderPublicKeyBase64,
+) => {
+  const rawBuffer = await blob.arrayBuffer();
+
+  const { key: aesKey, iv } = await generateAesKey();
+  const encryptedBuffer = await aesEncrypt(rawBuffer, aesKey, iv);
+  const rawAesKey = await window.crypto.subtle.exportKey("raw", aesKey);
+
+  const receiverPublicKey = await importPublicKey(receiverPublicKeyBase64);
+  const senderPublicKey = await importPublicKey(senderPublicKeyBase64);
+
+  const [encryptedAesKeyReceiver, encryptedAesKeySender] = await Promise.all([
+    wrapAesKey(rawAesKey, receiverPublicKey),
+    wrapAesKey(rawAesKey, senderPublicKey),
+  ]);
+
+  // Ciphertext has no meaningful MIME type — label it explicitly
+  const encryptedBlob = new Blob([encryptedBuffer], {
+    type: "application/octet-stream",
+  });
+
+  return {
+    encryptedBlob,
+    encryptedAesKeyReceiver,
+    encryptedAesKeySender,
+    iv: toBase64(iv),
+  };
+};
+
+/**
+ * Full media decrypt pipeline (shared by audio, image, and file).
+ * Fetches ciphertext from the Cloudinary URL stored on the message,
+ * decrypts it, and returns a local object URL the browser can display.
+ */
+const decryptBlob = async (
+  message,
+  privateKeyBase64,
+  currentUserId,
+  mimeType,
+) => {
+  const url = message.audio || message.image || message.file;
+  if (!url) throw new Error("Message has no media URL to decrypt");
+
+  const selectedKey = selectAesKey(message, currentUserId);
+  if (!selectedKey) throw new Error("No AES key found for the current user");
+
+  const response = await fetch(url);
+  const cipherBuffer = await response.arrayBuffer();
+
+  const privateKey = await importPrivateKey(privateKeyBase64);
+  const aesKey = await unwrapAesKey(selectedKey, privateKey);
+  const ivBytes = fromBase64(message.iv);
+
+  const decryptedBuffer = await aesDecrypt(cipherBuffer, aesKey, ivBytes);
+
+  return URL.createObjectURL(new Blob([decryptedBuffer], { type: mimeType }));
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// Public API — Key management
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Generate a fresh RSA-OAEP key pair.
+ * Called once at first login; keys are stored in localStorage.
+ * @returns {{ publicKey: string, privateKey: string }} — Base64-encoded SPKI / PKCS8
+ */
 export async function generateKeyPair() {
   const keyPair = await window.crypto.subtle.generateKey(
     {
@@ -20,326 +192,241 @@ export async function generateKeyPair() {
     ["encrypt", "decrypt"],
   );
 
-  const publicKey = await exportPublicKey(keyPair.publicKey);
-  const privateKey = await exportPrivateKey(keyPair.privateKey);
+  const [publicKey, privateKey] = await Promise.all([
+    exportPublicKey(keyPair.publicKey),
+    exportPrivateKey(keyPair.privateKey),
+  ]);
 
   return { publicKey, privateKey };
 }
 
-// ─── Export Keys ───────────────────────────────────────────────────────
+/** Export a CryptoKey (public) → Base64 SPKI string */
 export async function exportPublicKey(key) {
   const exported = await window.crypto.subtle.exportKey("spki", key);
-  return btoa(String.fromCharCode(...new Uint8Array(exported)));
+  return toBase64(exported);
 }
 
+/** Export a CryptoKey (private) → Base64 PKCS8 string */
 export async function exportPrivateKey(key) {
   const exported = await window.crypto.subtle.exportKey("pkcs8", key);
-  return btoa(String.fromCharCode(...new Uint8Array(exported)));
+  return toBase64(exported);
 }
 
-// ─── Import Keys ───────────────────────────────────────────────────────
+/** Import a Base64 SPKI string → CryptoKey (encrypt only) */
 export async function importPublicKey(base64) {
-  const binary = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-
   return window.crypto.subtle.importKey(
     "spki",
-    binary,
+    fromBase64(base64),
     { name: "RSA-OAEP", hash: "SHA-256" },
     true,
     ["encrypt"],
   );
 }
 
+/** Import a Base64 PKCS8 string → CryptoKey (decrypt only) */
 export async function importPrivateKey(base64) {
-  const binary = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-
   return window.crypto.subtle.importKey(
     "pkcs8",
-    binary,
+    fromBase64(base64),
     { name: "RSA-OAEP", hash: "SHA-256" },
     true,
     ["decrypt"],
   );
 }
 
-// ─── Encrypt Message (NEW VERSION) ─────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
+// Public API — Text messages
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Encrypt a plain-text message for both sender and receiver.
+ * @returns {{ encryptedMessage, encryptedAesKeyReceiver, encryptedAesKeySender, iv }}
+ *          All values are Base64 strings ready for JSON / FormData.
+ */
 export async function encryptMessage(
   plainText,
   receiverPublicKeyBase64,
   senderPublicKeyBase64,
 ) {
-  // 1️⃣ Generate AES key
-  const aesKey = await window.crypto.subtle.generateKey(
-    { name: "AES-GCM", length: 256 },
-    true,
-    ["encrypt", "decrypt"],
-  );
+  const { key: aesKey, iv } = await generateAesKey();
 
-  // 2️⃣ Encrypt message with AES
-  const iv = window.crypto.getRandomValues(new Uint8Array(12));
   const encodedText = new TextEncoder().encode(plainText);
+  const encryptedMessage = await aesEncrypt(encodedText, aesKey, iv);
+  const rawAesKey = await window.crypto.subtle.exportKey("raw", aesKey);
 
-  const encryptedMessage = await window.crypto.subtle.encrypt(
-    { name: "AES-GCM", iv },
-    aesKey,
-    encodedText,
-  );
-
-  // 3️⃣ Export AES key
-  const exportedAesKey = await window.crypto.subtle.exportKey("raw", aesKey);
-
-  // 4️⃣ Encrypt AES key with receiver public key
   const receiverPublicKey = await importPublicKey(receiverPublicKeyBase64);
-
-  const encryptedAesKeyReceiver = await window.crypto.subtle.encrypt(
-    { name: "RSA-OAEP" },
-    receiverPublicKey,
-    exportedAesKey,
-  );
-
-  // 5️⃣ Encrypt AES key with sender public key
   const senderPublicKey = await importPublicKey(senderPublicKeyBase64);
 
-  const encryptedAesKeySender = await window.crypto.subtle.encrypt(
-    { name: "RSA-OAEP" },
-    senderPublicKey,
-    exportedAesKey,
-  );
+  const [encryptedAesKeyReceiver, encryptedAesKeySender] = await Promise.all([
+    wrapAesKey(rawAesKey, receiverPublicKey),
+    wrapAesKey(rawAesKey, senderPublicKey),
+  ]);
 
-  // 6️⃣ Return encrypted payload
   return {
-    encryptedMessage: btoa(
-      String.fromCharCode(...new Uint8Array(encryptedMessage)),
-    ),
-
-    encryptedAesKeyReceiver: btoa(
-      String.fromCharCode(...new Uint8Array(encryptedAesKeyReceiver)),
-    ),
-
-    encryptedAesKeySender: btoa(
-      String.fromCharCode(...new Uint8Array(encryptedAesKeySender)),
-    ),
-
-    iv: btoa(String.fromCharCode(...iv)),
+    encryptedMessage: toBase64(encryptedMessage),
+    encryptedAesKeyReceiver,
+    encryptedAesKeySender,
+    iv: toBase64(iv),
   };
 }
 
-// ─── Decrypt Message ───────────────────────────────────────────────────
+/**
+ * Decrypt an encrypted text message.
+ * Gracefully returns the plain `text` field for unencrypted messages
+ * and a lock placeholder if decryption fails, so the UI never crashes.
+ *
+ * @param {object} encryptedData  — message object from the API
+ * @param {string} privateKeyBase64
+ * @param {string} currentUserId
+ * @returns {Promise<string>}
+ */
 export async function decryptMessage(
   encryptedData,
   privateKeyBase64,
   currentUserId,
 ) {
   try {
-    const {
-      encryptedMessage,
-      encryptedAesKeyReceiver,
-      encryptedAesKeySender,
-      encryptedAesKey,
-      sender,
-      iv,
-      isEncrypted,
-      messageType,
-      text,
-    } = encryptedData;
+    const { encryptedMessage, iv, isEncrypted, messageType, text } =
+      encryptedData;
 
-    // 🛑 1. Skip non-encrypted messages (IMPORTANT FIX)
-    if (!isEncrypted || messageType === "audio" || !encryptedMessage || !iv) {
+    // Not encrypted, or a media message — return plain text as-is
+    if (!isEncrypted || messageType !== "text" || !encryptedMessage || !iv) {
       return text || "";
     }
 
-    // 🧠 2. Normalize sender ID
-    const senderId = sender?._id || sender?.id || sender;
+    const selectedKey = selectAesKey(encryptedData, currentUserId);
+    if (!selectedKey) return "🔒 Encrypted message";
 
-    // 🧠 3. Select correct AES key
-    let selectedKey =
-      currentUserId === senderId
-        ? encryptedAesKeySender
-        : encryptedAesKeyReceiver;
-
-    // 🛟 4. Fallback (for safety)
-    if (!selectedKey) {
-      selectedKey = encryptedAesKey;
-    }
-
-    // 🛑 5. Final protection (NO crash)
-    if (!selectedKey) {
-      return "🔒 Encrypted message";
-    }
-
-    // 🔐 6. Import private key
     const privateKey = await importPrivateKey(privateKeyBase64);
+    const aesKey = await unwrapAesKey(selectedKey, privateKey);
+    const ivBytes = fromBase64(iv);
+    const cipherBytes = fromBase64(encryptedMessage);
+    const decryptedBuffer = await aesDecrypt(cipherBytes, aesKey, ivBytes);
 
-    // 🔄 7. Convert Base64 → Uint8Array
-    const encryptedAesKeyBytes = Uint8Array.from(atob(selectedKey), (c) =>
-      c.charCodeAt(0),
-    );
-
-    // 🔓 8. Decrypt AES key (RSA)
-    const decryptedAesKeyBytes = await window.crypto.subtle.decrypt(
-      { name: "RSA-OAEP" },
-      privateKey,
-      encryptedAesKeyBytes,
-    );
-
-    // 🔑 9. Import AES key
-    const aesKey = await window.crypto.subtle.importKey(
-      "raw",
-      decryptedAesKeyBytes,
-      { name: "AES-GCM" },
-      false,
-      ["decrypt"],
-    );
-
-    // 🔄 10. Convert IV
-    const ivBytes = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0));
-
-    // 🔄 11. Convert encrypted message
-    const encryptedMessageBytes = Uint8Array.from(atob(encryptedMessage), (c) =>
-      c.charCodeAt(0),
-    );
-
-    // 🔓 12. Decrypt message (AES)
-    const decryptedMessage = await window.crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: ivBytes },
-      aesKey,
-      encryptedMessageBytes,
-    );
-
-    return new TextDecoder().decode(decryptedMessage);
+    return new TextDecoder().decode(decryptedBuffer);
   } catch (err) {
-    console.error("Decryption failed:", err);
+    console.error("[crypto] decryptMessage failed:", err);
     return "🔒 Encrypted message";
   }
 }
 
-// ─── Encrypt Audio Blob ────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
+// Public API — Audio
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Encrypt a recorded audio Blob before uploading to Cloudinary.
+ * Cloudinary only ever stores ciphertext — the real audio never leaves
+ * the browser unencrypted.
+ *
+ * @param {Blob}   audioBlob
+ * @param {string} receiverPublicKeyBase64
+ * @param {string} senderPublicKeyBase64
+ * @returns {{ encryptedBlob, encryptedAesKeyReceiver, encryptedAesKeySender, iv }}
+ */
 export async function encryptAudioBlob(
   audioBlob,
   receiverPublicKeyBase64,
   senderPublicKeyBase64,
 ) {
-  // 1️⃣ Read blob into raw bytes
-  const audioBuffer = await audioBlob.arrayBuffer();
-
-  // 2️⃣ Generate a fresh AES-GCM key (one per message, just like text)
-  const aesKey = await window.crypto.subtle.generateKey(
-    { name: "AES-GCM", length: 256 },
-    true,
-    ["encrypt", "decrypt"],
-  );
-
-  // 3️⃣ Encrypt the raw audio bytes
-  const iv = window.crypto.getRandomValues(new Uint8Array(12));
-
-  const encryptedBuffer = await window.crypto.subtle.encrypt(
-    { name: "AES-GCM", iv },
-    aesKey,
-    audioBuffer,
-  );
-
-  // 4️⃣ Export the AES key so we can RSA-wrap it
-  const exportedAesKey = await window.crypto.subtle.exportKey("raw", aesKey);
-
-  // 5️⃣ Wrap AES key with receiver's public key
-  const receiverPublicKey = await importPublicKey(receiverPublicKeyBase64);
-
-  const encryptedAesKeyReceiver = await window.crypto.subtle.encrypt(
-    { name: "RSA-OAEP" },
-    receiverPublicKey,
-    exportedAesKey,
-  );
-
-  // 6️⃣ Wrap AES key with sender's public key (so sender can replay their own audio)
-  const senderPublicKey = await importPublicKey(senderPublicKeyBase64);
-
-  const encryptedAesKeySender = await window.crypto.subtle.encrypt(
-    { name: "RSA-OAEP" },
-    senderPublicKey,
-    exportedAesKey,
-  );
-
-  // 7️⃣ Return encrypted Blob (ciphertext) + base64-encoded keys + iv
-  const encryptedBlob = new Blob([encryptedBuffer], {
-    type: "application/octet-stream", // NOT audio/webm — this is raw ciphertext
-  });
-
-  return {
-    encryptedBlob,
-    encryptedAesKeyReceiver: btoa(
-      String.fromCharCode(...new Uint8Array(encryptedAesKeyReceiver)),
-    ),
-    encryptedAesKeySender: btoa(
-      String.fromCharCode(...new Uint8Array(encryptedAesKeySender)),
-    ),
-    iv: btoa(String.fromCharCode(...iv)),
-  };
+  return encryptBlob(audioBlob, receiverPublicKeyBase64, senderPublicKeyBase64);
 }
 
-// ─── Decrypt Audio Blob ────────────────────────────────────────────────
+/**
+ * Fetch encrypted audio from Cloudinary, decrypt it, and return
+ * a local object URL the <audio> element can play directly.
+ *
+ * @param {object} message        — message object from the API
+ * @param {string} privateKeyBase64
+ * @param {string} currentUserId
+ * @returns {Promise<string>}     — blob: URL
+ */
 export async function decryptAudioBlob(
   message,
   privateKeyBase64,
   currentUserId,
 ) {
-  const {
-    audio, // Cloudinary URL — contains raw ciphertext bytes
-    encryptedAesKeyReceiver,
-    encryptedAesKeySender,
-    encryptedAesKey, // legacy fallback for old messages
-    iv,
-    sender,
-  } = message;
+  return decryptBlob(message, privateKeyBase64, currentUserId, "audio/webm");
+}
 
-  // 1️⃣ Fetch the ciphertext bytes from Cloudinary
-  const response = await fetch(audio);
-  const cipherBuffer = await response.arrayBuffer();
+// ─────────────────────────────────────────────────────────────────────────
+// Public API — Images
+// ─────────────────────────────────────────────────────────────────────────
 
-  // 2️⃣ Pick the correct wrapped AES key based on who is viewing
-  const senderId = sender?._id || sender?.id || sender;
+/**
+ * Encrypt an image File/Blob before uploading to Cloudinary.
+ *
+ * @param {Blob}   imageBlob
+ * @param {string} receiverPublicKeyBase64
+ * @param {string} senderPublicKeyBase64
+ * @returns {{ encryptedBlob, encryptedAesKeyReceiver, encryptedAesKeySender, iv }}
+ */
+export async function encryptImageBlob(
+  imageBlob,
+  receiverPublicKeyBase64,
+  senderPublicKeyBase64,
+) {
+  return encryptBlob(imageBlob, receiverPublicKeyBase64, senderPublicKeyBase64);
+}
 
-  let selectedKey =
-    currentUserId === senderId
-      ? encryptedAesKeySender
-      : encryptedAesKeyReceiver;
+/**
+ * Fetch encrypted image from Cloudinary, decrypt it, and return
+ * a local object URL an <img> element can display directly.
+ *
+ * @param {object} message        — message object from the API
+ * @param {string} privateKeyBase64
+ * @param {string} currentUserId
+ * @returns {Promise<string>}     — blob: URL
+ */
+export async function decryptImageBlob(
+  message,
+  privateKeyBase64,
+  currentUserId,
+) {
+  // Use the original file's MIME type if stored; fall back to jpeg
+  const mimeType = message.fileMimeType || "image/jpeg";
+  return decryptBlob(message, privateKeyBase64, currentUserId, mimeType);
+}
 
-  // Fallback for legacy messages that only stored one key
-  if (!selectedKey) selectedKey = encryptedAesKey;
-  if (!selectedKey) throw new Error("No AES key found for this user");
+// ─────────────────────────────────────────────────────────────────────────
+// Public API — Files / Documents
+// ─────────────────────────────────────────────────────────────────────────
 
-  // 3️⃣ RSA-unwrap the AES key using our private key
-  const privateKey = await importPrivateKey(privateKeyBase64);
+/**
+ * Encrypt any File/Blob (PDF, Word, Excel, etc.) before uploading.
+ *
+ * @param {Blob}   fileBlob
+ * @param {string} receiverPublicKeyBase64
+ * @param {string} senderPublicKeyBase64
+ * @returns {{ encryptedBlob, encryptedAesKeyReceiver, encryptedAesKeySender, iv }}
+ */
+export async function encryptFileBlob(
+  fileBlob,
+  receiverPublicKeyBase64,
+  senderPublicKeyBase64,
+) {
+  return encryptBlob(fileBlob, receiverPublicKeyBase64, senderPublicKeyBase64);
+}
 
-  const encryptedAesKeyBytes = Uint8Array.from(atob(selectedKey), (c) =>
-    c.charCodeAt(0),
+/**
+ * Fetch an encrypted file from Cloudinary, decrypt it, and return
+ * a local object URL. The caller should trigger a download using the
+ * original fileName stored on the message.
+ *
+ * @param {object} message        — message object from the API
+ * @param {string} privateKeyBase64
+ * @param {string} currentUserId
+ * @returns {Promise<string>}     — blob: URL
+ */
+export async function decryptFileBlob(
+  message,
+  privateKeyBase64,
+  currentUserId,
+) {
+  return decryptBlob(
+    message,
+    privateKeyBase64,
+    currentUserId,
+    "application/octet-stream",
   );
-
-  const decryptedAesKeyBytes = await window.crypto.subtle.decrypt(
-    { name: "RSA-OAEP" },
-    privateKey,
-    encryptedAesKeyBytes,
-  );
-
-  // 4️⃣ Import the raw AES key
-  const aesKey = await window.crypto.subtle.importKey(
-    "raw",
-    decryptedAesKeyBytes,
-    { name: "AES-GCM" },
-    false,
-    ["decrypt"],
-  );
-
-  // 5️⃣ Decrypt the audio bytes
-  const ivBytes = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0));
-
-  const decryptedBuffer = await window.crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: ivBytes },
-    aesKey,
-    cipherBuffer,
-  );
-
-  // 6️⃣ Wrap in a Blob and return a local playable URL
-  // This URL never leaves the browser — Cloudinary only ever saw ciphertext
-  const audioBlob = new Blob([decryptedBuffer], { type: "audio/webm" });
-  return URL.createObjectURL(audioBlob);
 }
